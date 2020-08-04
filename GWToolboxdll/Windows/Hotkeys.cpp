@@ -1,3 +1,4 @@
+#include "SkillListingWindow.h"
 #include "stdafx.h"
 
 #include <GWCA/Constants/Constants.h>
@@ -56,6 +57,8 @@ TBHotkey *TBHotkey::HotkeyFactory(CSimpleIni *ini, const char *section)
         return new HotkeySendChat(ini, section);
     } else if (type.compare(HotkeyUseItem::IniSection()) == 0) {
         return new HotkeyUseItem(ini, section);
+    } else if (type.compare(HotkeyUseSkill::IniSection()) == 0) {
+        return new HotkeyUseSkill(ini, section);
     } else if (type.compare(HotkeyDropUseBuff::IniSection()) == 0) {
         return new HotkeyDropUseBuff(ini, section);
     } else if (type.compare(HotkeyToggle::IniSection()) == 0 &&
@@ -1257,4 +1260,205 @@ void HotkeyFlagHero::Execute()
     } else {
         GW::PartyMgr::FlagHero(hero, pos);
     }
+}
+
+HotkeyUseSkill::HotkeyUseSkill(CSimpleIni *ini, const char *section)
+    : TBHotkey(ini, section)
+{
+    skill_num = static_cast<int>(ini->GetLongValue(section, "SkillNumber", 1));
+    abort_after = static_cast<clock_t>(ini->GetLongValue(section, "AbortAFter", 1000));
+    skill_ids = StringToVec(ini->GetValue(section, "SkillIds", ""));
+}
+
+void HotkeyUseSkill::Save(CSimpleIni *ini, const char *section) const
+{
+    TBHotkey::Save(ini, section);
+    ini->SetLongValue(section, "SkillNumber", static_cast<long>(skill_num));
+    ini->SetLongValue(section, "AbortAFter", static_cast<long>(abort_after));
+    ini->SetValue(section, "SkillIds", VecToString(skill_ids).c_str());
+}
+void HotkeyUseSkill::Description(char *buf, size_t bufsz) const
+{
+    snprintf(buf, bufsz, "Use Skill %d", skill_num);
+}
+void HotkeyUseSkill::Draw()
+{
+    ImGui::PushItemWidth(ImGui::GetWindowWidth() - 150);
+
+    // Pick Skill to use
+    auto skill_num_copy = skill_num;
+    if (ImGui::InputInt("Skill", &skill_num_copy, 1, 1)) {
+        if (skill_num_copy >= 1 && skill_num_copy <= 8) {
+            skill_num = skill_num_copy;
+        }
+        hotkeys_changed = true;
+    }
+
+    // Set abort Timer
+    auto abort_after_copy = static_cast<int>(abort_after);
+    if (ImGui::InputInt("ms", &abort_after_copy, 1, 100)) {
+        if (abort_after_copy >= 0) {
+            abort_after = abort_after_copy;
+        }
+        hotkeys_changed = true;
+    }
+    ImGui::ShowHelp("Abort trying to use the skill after <> milliseconds.");
+
+    auto already_active = [&](GW::Constants::SkillID input) {
+        auto const it = std::find(skill_ids.begin(), skill_ids.end(), input);
+        return it != skill_ids.end();
+    };
+
+    // Add SkillID by Name
+    using GW::Constants::SkillID;
+    constexpr auto skill_count = static_cast<uint32_t>(SkillID::Heroic_Refrain);
+    auto const get_skill_name_by_id = [](uint32_t const ID) {
+        // Costly but only called when Input in Searchbar is changed
+        auto const &skill = GW::SkillbarMgr::GetSkillConstantData(ID);
+        wchar_t enc_buf[64] = {};
+
+        if (GW::UI::UInt32ToEncStr(skill.name, enc_buf, 16) == false)
+            throw; // Shouldnt throw, as SkillListingsWindow doesnt either
+
+        auto ret_val = std::wstring{};
+        GW::UI::AsyncDecodeStr(enc_buf, &ret_val);
+
+        return ret_val;
+    };
+
+    struct NamedSkillID
+    {
+        SkillID ID;
+        std::wstring Name;
+    };
+    static auto search_results = std::vector<NamedSkillID>{};
+    constexpr auto buf_size = 16;
+    static char search_buf[buf_size] = {};
+
+    if (ImGui::InputText("Search Skill Name", search_buf, sizeof(search_buf))) {
+        search_results.clear();
+
+        if (search_buf[0] != '\0' && std::strlen(search_buf) > 2) {
+            wchar_t search_wbuf_lowcase[buf_size] = {};
+            std::mbstowcs(search_wbuf_lowcase, search_buf, buf_size);
+            std::transform(std::begin(search_wbuf_lowcase), std::end(search_wbuf_lowcase), std::begin(search_wbuf_lowcase), ::towlower);
+
+            for (auto skill_id = 0u; skill_id < skill_count; ++skill_id) {
+                auto const name = get_skill_name_by_id(skill_id);
+
+                auto lowcase_name = name; // assign name to alloc only once
+                std::transform(name.begin(), name.end(), lowcase_name.begin(), ::towlower);
+
+                auto const found_substr = std::wcsstr(lowcase_name.c_str(), search_wbuf_lowcase);
+
+                if (found_substr) {
+                    search_results.push_back({static_cast<SkillID>(skill_id), name});
+
+                    if (search_results.size() >= 5) // limit results, esthetics and performace
+                        break;
+                }
+            }
+        }
+    }
+
+    if (!search_results.empty()) {
+        ImGui::Separator();
+        ImGui::Text("Suggestions");
+
+        for (auto const &result : search_results) {
+            ImGui::PushID(&result);
+            {
+                if (ImGui::SmallButton("Pick") && !already_active(result.ID)) {
+                    skill_ids.push_back(result.ID);
+                }
+                ImGui::SameLine();
+
+                ImGui::Text("%S", result.Name.c_str());
+            }
+            ImGui::PopID();
+        }
+
+        ImGui::Separator();
+    }
+
+    // Add generic SkillID
+    static int id_input = 0;
+    ImGui::InputInt("", &id_input);
+    ImGui::SameLine();
+    if (ImGui::Button("Add SkillID") && id_input != 0 && !already_active(static_cast<GW::Constants::SkillID>(id_input))) {
+        auto const skill_id = static_cast<GW::Constants::SkillID>(id_input);
+        skill_ids.push_back(skill_id);
+        std::sort(skill_ids.begin(), skill_ids.end(), [](auto a, auto b) -> bool { return static_cast<int>(a) < static_cast<int>(b); });
+    }
+
+    // Show & Remove Active SkillIDs
+    if (!skill_ids.empty()) {
+        ImGui::Separator();
+        ImGui::Text("Active SkillIDs:");
+        for (auto it = skill_ids.begin(); it != skill_ids.end();) {
+            ImGui::AlignFirstTextHeightToWidgets();
+
+            auto const id_str = std::to_string(static_cast<uint32_t>(*it));
+            ImGui::Text(id_str.c_str());
+
+            auto gwskill = SkillListingWindow::Skill(&GW::SkillbarMgr::GetSkillConstantData(static_cast<uint32_t>(*it)));
+
+            ImGui::SameLine();
+            ImGui::SetCursorPosX(50);
+            ImGui::Text("%S", gwskill.Name());
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%S,\n%S", gwskill.GWWDescription(), "");
+            }
+
+            ImGui::SameLine();
+            ImGui::SetCursorPosX(250);
+            ImGui::PushID(&(*it));
+            if (ImGui::Button("Remove")) {
+                it = skill_ids.erase(it);
+            } else
+                ++it;
+            ImGui::PopID();
+        }
+    }
+    ImGui::Separator();
+}
+void HotkeyUseSkill::Execute()
+{
+    if (!CanUse())
+        return;
+    auto *me = GW::Agents::GetPlayer();
+    if (me == nullptr)
+        return;
+    auto *target = GW::Agents::GetTargetAsAgentLiving();
+    if (target == nullptr) {
+        return;
+    }
+    if (abort_after > 0) {
+        abort_at = clock() + abort_after;
+    }
+    HotkeysWindow::Instance().SetUseHotkey(this);
+}
+
+std::string HotkeyUseSkill::VecToString(const std::vector<GW::Constants::SkillID> &vec) const
+{
+    auto ret = std::stringstream{};
+    for (auto id : vec) {
+        ret << std::to_string(static_cast<uint32_t>(id)) << ';';
+    }
+    return ret.str();
+}
+
+std::vector<GW::Constants::SkillID> HotkeyUseSkill::StringToVec(const std::string &str) const
+{
+    const auto split = [](const auto string, auto delimiter) -> std::vector<GW::Constants::SkillID> {
+        auto text = std::stringstream(string);
+        auto words = std::vector<GW::Constants::SkillID>{};
+        std::string segment;
+        while (std::getline(text, segment, delimiter)) {
+            if (!segment.empty())
+                words.push_back(static_cast<GW::Constants::SkillID>(std::stoi(segment)));
+        }
+        return words;
+    };
+    return split(str, ';');
 }
