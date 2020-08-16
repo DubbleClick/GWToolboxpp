@@ -450,6 +450,11 @@ void GWToolbox::Draw(IDirect3DDevice9* device) {
         if (!GuiUtils::FontsLoaded())
             return; // Fonts not loaded yet.
 
+        const HANDLE gw_handle = GetModuleHandle("Gw.exe");
+        if (!*reinterpret_cast<bool *>(reinterpret_cast<uintptr_t>(gw_handle) + 0x61C309)) {
+            return;
+        }
+
         ImGui_ImplDX9_NewFrame();
         // Key up/down events don't get passed to gw window when out of focus, but we need the following to be correct, 
         // or things like alt-tab make imgui think that alt is still down.
